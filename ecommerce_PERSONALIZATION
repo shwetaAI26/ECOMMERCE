@@ -1,0 +1,164 @@
+-- ============================================================
+
+-- E-COMMERCE PERSONALIZATION QUICKSTART (SQL-ONLY)
+
+-- End-to-end example:
+
+--  1. Create database & schema
+--  2. Load sample orders data
+--  3. Build customer segments
+--  4. Prepare training data for ML
+--  5. Train Snowflake ML classification model
+--  6. Score customers & optionally persist scores
+
+-- ============================================================
+
+----------------------------------------------------------------
+
+-- (Optional) Step 0: Choose a warehouse
+
+----------------------------------------------------------------
+
+-- Uncomment and replace <YOUR_WAREHOUSE> if needed:
+-- USE WAREHOUSE <YOUR_WAREHOUSE>;
+
+----------------------------------------------------------------
+
+-- Step 1: Create database, schema, and sample CUSTOMER_ORDERS
+
+----------------------------------------------------------------
+
+CREATE OR REPLACE DATABASE DATACLOUDDISPATCHSI;
+USE DATABASE DATACLOUDDISPATCHSI;
+CREATE OR REPLACE SCHEMA ECOMMERCE;
+USE SCHEMA ECOMMERCE;
+
+-- Create the orders table
+
+CREATE OR REPLACE TABLE CUSTOMER_ORDERS (
+  CUSTOMER_ID  NUMBER,
+  ORDER_ID     NUMBER,
+  ORDER_DATE   DATE,
+  ORDER_VALUE  NUMBER(10,2),
+  PRODUCT_ID   NUMBER
+);
+
+-- Insert sample e-commerce data
+
+INSERT INTO CUSTOMER_ORDERS (CUSTOMER_ID, ORDER_ID, ORDER_DATE, ORDER_VALUE, PRODUCT_ID) VALUES
+(1001,50001,'2023-01-15', 89.99,201),
+(1001,50022,'2023-03-02',120.49,305),
+(1002,50110,'2023-05-11', 45.00,110),
+(1003,50155,'2023-02-19',239.00,402),
+(1003,50190,'2023-05-22',130.00,233),
+(1003,50201,'2023-06-01', 99.99,110),
+(1004,50333,'2023-01-05', 19.99,502),
+(1001,50390,'2023-11-11',301.00,900),
+(1005,50400,'2023-12-12', 67.50,702);
+
+-- Quick preview of raw orders
+
+SELECT * FROM CUSTOMER_ORDERS ORDER BY ORDER_DATE;
+
+----------------------------------------------------------------
+
+-- Step 2: Build customer segments (frequency & average order value)
+
+----------------------------------------------------------------
+
+-- Aggregate behavior to create one row per customer
+
+CREATE OR REPLACE TABLE CUSTOMER_SEGMENTS AS
+SELECT
+    CUSTOMER_ID,
+    COUNT(ORDER_ID)  AS PURCHASE_COUNT,
+    AVG(ORDER_VALUE) AS AVG_ORDER_VALUE
+FROM CUSTOMER_ORDERS
+--WHERE ORDER_DATE BETWEEN '2023-01-01' AND '2023-12-31'
+GROUP BY CUSTOMER_ID;
+
+-- Inspect segments
+
+SELECT * FROM CUSTOMER_SEGMENTS ORDER BY PURCHASE_COUNT DESC;
+
+----------------------------------------------------------------
+
+-- Step 3: Prepare training data for Snowflake ML
+-- Add a label indicating whether a customer is “high-value”
+-- (in this example: 3 or more purchases)
+
+----------------------------------------------------------------
+
+CREATE OR REPLACE TABLE CUSTOMER_SEGMENTS_TRAIN AS
+SELECT
+    CUSTOMER_ID,
+    PURCHASE_COUNT,
+    AVG_ORDER_VALUE,
+    IFF(PURCHASE_COUNT >= 3, 1, 0) AS TARGET_HIGH_VALUE
+FROM CUSTOMER_SEGMENTS;
+
+-- View training data with target
+
+SELECT * FROM CUSTOMER_SEGMENTS_TRAIN ORDER BY PURCHASE_COUNT DESC;
+
+----------------------------------------------------------------
+
+-- Step 4: Train a classification model with Snowflake ML
+-- This learns to predict TARGET_HIGH_VALUE from the features
+-- PURCHASE_COUNT and AVG_ORDER_VALUE.
+
+----------------------------------------------------------------
+
+CREATE OR REPLACE SNOWFLAKE.ML.CLASSIFICATION HIGH_VALUE_MODEL (
+    INPUT_DATA     => SYSTEM$REFERENCE('TABLE','ECOMMERCE.CUSTOMER_SEGMENTS_TRAIN'),
+    TARGET_COLNAME => 'TARGET_HIGH_VALUE'
+);
+
+-- (Optional) Inspect training metrics
+CALL HIGH_VALUE_MODEL!SHOW_EVALUATION_METRICS();
+
+----------------------------------------------------------------
+
+-- Step 5: Score customers with the trained model
+-- This returns the predicted class (0 = not high-value, 1 = high-value).
+
+----------------------------------------------------------------
+
+SELECT
+    CUSTOMER_ID,
+    PURCHASE_COUNT,
+    AVG_ORDER_VALUE,
+    HIGH_VALUE_MODEL!PREDICT(
+        INPUT_DATA => OBJECT_CONSTRUCT(
+            'PURCHASE_COUNT', PURCHASE_COUNT,
+            'AVG_ORDER_VALUE', AVG_ORDER_VALUE
+        )
+    ):PREDICTION:"class"::NUMBER AS PREDICTED_HIGH_VALUE
+FROM CUSTOMER_SEGMENTS
+ORDER BY PREDICTED_HIGH_VALUE DESC, PURCHASE_COUNT DESC;
+
+----------------------------------------------------------------
+
+-- Step 6 (Optional): Persist personalized scores for downstream use
+-- This creates a reusable table that other teams, dashboards,
+-- and applications can query.
+
+----------------------------------------------------------------
+
+CREATE OR REPLACE TABLE CUSTOMER_VALUE_SCORES AS
+SELECT
+    CUSTOMER_ID,
+    PURCHASE_COUNT,
+    AVG_ORDER_VALUE,
+    HIGH_VALUE_MODEL!PREDICT(
+        INPUT_DATA => OBJECT_CONSTRUCT(
+            'PURCHASE_COUNT', PURCHASE_COUNT,
+            'AVG_ORDER_VALUE', AVG_ORDER_VALUE
+        )
+    ):PREDICTION:"class"::NUMBER AS PREDICTED_HIGH_VALUE
+FROM CUSTOMER_SEGMENTS;
+
+-- Final scored output
+
+SELECT * FROM CUSTOMER_VALUE_SCORES
+ORDER BY PREDICTED_HIGH_VALUE DESC, PURCHASE_COUNT DESC;  
