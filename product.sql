@@ -1,0 +1,1 @@
+create or replace product as select * from customer_data;
